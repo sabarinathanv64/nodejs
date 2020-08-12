@@ -1,0 +1,1275 @@
+USE [AssetProQA]
+GO
+/****** Object:  StoredProcedure [dbo].[usp_GetEventList]    Script Date: 12-08-2020 19:05:29 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[usp_GetEventList]
+(
+   @WebUserID nvarchar(100),
+   @SiteID nvarchar(100),
+   @Type nvarchar(100),
+   @EventCode nvarchar(100)
+   
+)  
+AS
+BEGIN
+--DECLARE @SiteID VARCHAR(100)='85B3A580-A219-43ED-BAD2-97A07128E34C'--'BD9D9936-25C3-435F-9F9E-699FF222E527'
+--DECLARE @EVENTCODE VARCHAR(100)=516
+ --DECLARE @StartDate date= Dateadd(Month, Datediff(Month, 0, DATEADD(m, -5,GETUTCDATE())), 0)
+ --DECLARE @EndDate date
+	DECLARE @SITETIMEZONE VARCHAR(200)
+	DECLARE @StartDate date= Dateadd(Month, Datediff(Month, 0, DATEADD(m, -8,GETUTCDATE())), 0)
+	SELECT @SITETIMEZONE = ISNULL(CTZ.SQLSERVERTIMEZONE,'UTC')
+	FROM [Site] S 
+	INNER JOIN CUSTOMTIMEZONE CTZ ON CTZ.TIMEZONEID = ISNULL(S.Timezone,17)
+	WHERE (ID = @SiteID)
+	SELECT A.ID,A.System,A.Name,A.SamplingX,A.SamplingY,A.SamplingZ,A.CheckListID INTO #ASSET FROM ASSET A INNER JOIN AssetSite ASS ON ASS.AssetID=A.ID WHERE ASS.SiteID =@SiteID
+ IF(@EVENTCODE=264)
+	BEGIN
+----PM DUE ALARM
+		SELECT A.AssetID,A.OperatorID,E.PM_Hours,E.Hours_Past_PM_Alarm
+		INTO #Alarm2
+		FROM EventData2 E INNER JOIN ALARM A  ON A.ID=E.AlarmID 
+		LEFT JOIN CheckListQuestion C ON C.UniqueID=JSON_Value(E.EventData,'$.QuestionID')
+		LEFT JOIN Operator O ON O.UniqueID=JSON_Value(E.EventData,'$.Operator')
+		WHERE A.EventCode='778'AND E.EventData IS NOT NULL
+		SELECT A.AssetID,A.OperatorID,E.PM_Hours,E.Hours_Past_PM_Alarm
+		INTO #Alarm4
+		FROM EventData2 E INNER JOIN AlarmArchive A  ON A.ID=E.AlarmID 
+		LEFT JOIN CheckListQuestion C ON C.UniqueID=JSON_Value(E.EventData,'$.QuestionID')
+		LEFT JOIN Operator O ON O.UniqueID=JSON_Value(E.EventData,'$.Operator')
+		WHERE A.EventCode='778'AND E.EventData IS NOT NULL
+
+		INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,PMTreshold,PastPM,Latitude,Longitude) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		CASE 
+		WHEN AL.PM_Hours= 0  THEN E.PM_Hours
+		ELSE AL.PM_Hours End AS PMThreshold, 
+		CASE
+		WHEN AL.Hours_Past_PM_Alarm=0  THEN E.Hours_Past_PM_Alarm 
+		ELSE AL.Hours_Past_PM_Alarm END AS Hours_Past_PM,E.Latitude,E.Longitude 
+		FROM Alarm A
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID
+		LEFT JOIN EventData2 E on E.AlarmID=A.ID
+		LEFT JOIN Operator O on O.ID=A.OperatorID
+		LEFT JOIN #Alarm2 AL on AL.AssetID=A.AssetID
+		WHERE A.SiteID=@SiteID AND A.EventCode=264 AND CONVERT(Date,A.Date)>=@StartDate 
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		CASE 
+		WHEN AL.PM_Hours= 0  THEN E.PM_Hours
+		ELSE AL.PM_Hours End AS PMThreshold,
+		CASE
+		WHEN AL.Hours_Past_PM_Alarm=0  THEN E.Hours_Past_PM_Alarm 
+		ELSE AL.Hours_Past_PM_Alarm END AS Hours_Past_PM,E.Latitude,E.Longitude 
+		FROM Alarm A 
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		LEFT JOIN #Alarm4 AL ON AL.AssetID=A.AssetID
+		WHERE A.SiteID=@SiteID AND A.EventCode=264 AND CONVERT(Date,A.Date)>=@StartDate )A
+		GROUP BY A.ID,A.EventCode,A.AssetID,Asset,A.Date,PMThreshold,Hours_Past_PM,Latitude,Longitude
+		
+	    DROP TABLE #Alarm2
+    	DROP TABLE #Alarm4
+		--drop table #ASSET
+	END
+ELSE IF(@EVENTCODE=512)
+	BEGIN
+
+-------Battery_Low_Water_Alarm
+		INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,StartTimeAndDate,SOCLevel,Voltage,EndTimeAndDate,Duration,[Current],Temperature,OngoingAlarm) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,
+		LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,round(JSON_VALUE(E.EventData,'$.Voltage')/100,2)AS Voltage,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate,
+		AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,
+		CASE
+		WHEN S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END as Temperature
+		,CASE
+		when AB.Duration is NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+
+		FROM AlarmBattery A
+		left join site s on s.id=a.siteid
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+		LEFT JOIN (SELECT AA.ID,AA.Date,AA.ResetID,AA.Duration FROM AlarmBattery AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					LEFT JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE AA.SiteID=@SiteID AND AA.EventCode=513 AND CONVERT(Date,AA.Date)>=@StartDate) AB ON AB.ResetID=A.ResetID
+
+		WHERE A.SiteID=@SiteID AND A.EventCode=512 AND CONVERT(Date,A.Date)>=@StartDate  
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,
+		LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,round(JSON_VALUE(E.EventData,'$.Voltage')/100,2) AS Voltage,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate,
+		AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,
+        CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		CASE
+		when AB.Duration is NULL then 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmBatteryArchive A
+		LEFT JOIN Site S ON S.ID=A.SiteID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+		LEFT JOIN (SELECT AA.ID,AA.Date,AA.ResetID,AA.Duration FROM AlarmBattery AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					LEFT JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE AA.SiteID=@SiteID AND AA.EventCode=513 AND CONVERT(Date,AA.Date)>=@StartDate) AB ON AB.ResetID=A.ResetID
+
+		WHERE A.SiteID=@SiteID AND A.EventCode=512 AND CONVERT(Date,A.Date)>=@StartDate )A
+	END
+ELSE IF(@EVENTCODE=514)
+	BEGIN
+		------Battery_Low_Voltage_Alarm
+		INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,StartTimeAndDate,SOCLevel,Voltage,LowestVoltage,AverageVoltage,EndTimeAndDate,Duration,[Current],Temperature,OngoingAlarm) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,
+		LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,ROUND(JSON_VALUE(E.EventData,'$.Voltage')/100,2) AS Voltage,ROUND(AB.MinVoltage/100,2) MinVoltage,ROUND(AB.MaxVoltage/100,2) MaxVoltage,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate,
+		AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,
+		 case
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature
+		,case
+		when AB.Date IS NULL then 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmBattery A
+		LEFT JOIN Site S ON S.ID=A.SiteID
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.Duration,E.MinVoltage,E.MaxVoltage FROM AlarmBattery AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE AA.SiteID=@SiteID AND AA.EventCode=515 AND CONVERT(Date,AA.Date)>=@StartDate) AB ON AB.ResetID=A.ResetID
+
+		WHERE A.SiteID=@SiteID AND A.EventCode=514 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,
+		LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,ROUND(JSON_VALUE(E.EventData,'$.Voltage')/100,2) AS Voltage,ROUND(AB.MinVoltage/100,2) MinVoltage,ROUND(AB.MaxVoltage/100,2) MaxVoltage,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate,
+		AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,
+		 case
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		case
+		when AB.Date IS NULL then 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmBatteryArchive A 
+		LEFT JOIN Site S ON S.ID=A.SiteID
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.Duration,E.MinVoltage,E.MaxVoltage FROM AlarmBattery AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE AA.SiteID=@SiteID AND AA.EventCode=515 AND CONVERT(Date,AA.Date)>=@StartDate) AB ON AB.ResetID=A.ResetID
+
+		WHERE A.SiteID=@SiteID AND A.EventCode=514 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=516)
+	BEGIN
+	----Battery_High_Voltage_Alarm
+	    INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,StartTimeAndDate,SOCLevel,Voltage,HighestVoltage,AverageVoltage,Duration,[Current],Temperature,EndTimeAndDate,OngoingAlarm) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,
+		LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,ROUND(JSON_VALUE(E.EventData,'$.Voltage')/100,2) AS Voltage,ROUND(AB.MaxVoltage/100,2) MaxVoltage,ROUND(AB.MinVoltage/100,2) MinVoltage,AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmBattery A 
+		LEFT JOIN Site S ON S.ID=A.SiteID
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.Duration,E.MinVoltage,E.MaxVoltage FROM AlarmBattery AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE AA.SiteID=@SiteID AND AA.EventCode=517 AND CONVERT(Date,AA.Date)>=@StartDate) AB ON AB.ResetID=A.ResetID
+
+		WHERE A.SiteID=@SiteID AND A.EventCode=516 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,
+		LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,JSON_VALUE(E.EventData,'$.Voltage') AS Voltage,ROUND(AB.MaxVoltage/100,2) MaxVoltage,ROUND(AB.MinVoltage/100,2) MinVoltage,AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm		
+		FROM AlarmBatteryArchive A
+		LEFT JOIN Site S ON S.ID=A.SiteID
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.Duration,E.MinVoltage,E.MaxVoltage FROM AlarmBatteryArchive AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE AA.SiteID=@SiteID AND AA.EventCode=517 AND CONVERT(Date,AA.Date)>=@StartDate) AB ON AB.ResetID=A.ResetID
+
+		WHERE A.SiteID=@SiteID AND A.EventCode=516 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=261)
+	BEGIN
+----Impact_Alarm
+        INSERT INTO COMMON(EventID,EventCode,AssetID,DateAndTime,AssetName,Severity,X,Y,Z,Speed,XFlag,YFlag,ZFlag,Latitude,Longitude,ResetBy,OperatorName) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		LTRIM(RTRIM(ASS.Name)) Asset
+		,CASE
+		WHEN AST.HighSeverity>AST.MediumSeverity THEN 'Medium'
+		WHEN AST.HighSeverity<AST.MediumSeverity OR AST.HighSeverity=AST.MediumSeverity THEN 'High'
+		ELSE 'Low' 
+		END AS Severity,E.x X,E.y Y,E.z Z ,
+		ISNULL(A.Speed,0) Speed,
+		CASE
+		WHEN E.y>ASS.SamplingX THEN 'Y' ELSE 'N' END AS XFlag,
+		CASE
+		WHEN E.y>ASS.SamplingY THEN 'Y' ELSE 'N'END AS YFlag,
+		CASE
+		WHEN E.y>ASS.SamplingY THEN 'Y' ELSE 'N'END AS ZFlag,E.Latitude,E.Longitude,OP.Name,O.Name AS Operator 
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN AssetType AST ON AST.ID=A.AssetTypeID
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		LEFT JOIN Operator OP ON OP.ID=A.ResetByID
+		WHERE A.SiteID=@SiteID AND A.EventCode=261 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		LTRIM(RTRIM(ASS.Name)) Asset
+		,CASE
+		WHEN AST.HighSeverity>AST.MediumSeverity THEN 'Medium'
+		WHEN AST.HighSeverity<AST.MediumSeverity OR AST.HighSeverity=AST.MediumSeverity THEN 'High'
+		ELSE 'Low' 
+		END AS Severity,E.x X,E.y Y,E.z Z ,
+		ISNULL(A.Speed,0) Speed,
+		CASE
+		WHEN E.y>ASS.SamplingX THEN 'Y' ELSE 'N' END AS XFlag,
+		CASE
+		WHEN E.y>ASS.SamplingY THEN 'Y' ELSE 'N'END AS YFlag,
+		CASE
+		WHEN E.y>ASS.SamplingY THEN 'Y' ELSE 'N'END AS ZFlag,E.Latitude,E.Longitude,OP.Name,O.Name AS Operator 
+    	FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN AssetType AST ON AST.ID=A.AssetTypeID
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		LEFT JOIN Operator OP ON OP.ID=A.ResetByID
+		WHERE A.SiteID=@SiteID AND A.EventCode=261 AND CONVERT(Date,A.Date)>=@StartDate)A
+		END
+ELSE IF(@EVENTCODE=258)
+	BEGIN
+		--Skipped_Checklist_Alarm
+        INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,CheckListName,OperatorName,Latitude,Longitude) 
+		SELECT * FROM(
+		select A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		c.Name as CheckListName,O.Name as OperatorName,E.Latitude,E.Longitude 
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		LEFT JOIN CheckList C ON C.ID=Ass.CheckListID
+		WHERE A.SiteID=@SiteID AND A.EventCode=258 and CONVERT(Date,A.Date)>=@StartDate 
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		c.Name as CheckListName,O.Name as OperatorName,E.Latitude,E.Longitude 
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN(1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		LEFT JOIN CheckList C ON C.ID=Ass.CheckListID
+		WHERE A.SiteID=@SiteID AND A.EventCode=258 and CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=256)
+	BEGIN
+		----Max_Skipped_Checklist_Reached_Alarm
+		INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,NoofskippedcheckList,OperatorName,Latitude,Longitude) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		JSON_VALUE(E.EventData,'$.Skipped_Checklists') AS Skipped_Checklist,O.Name as OperatorName,E.Latitude,E.longitude 
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System in (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		where A.SiteID=@SiteID AND A.EventCode=256 and CONVERT(Date,A.Date)>=@StartDate and (A.AlarmStatus=1 or A.AlarmStatus=2 or A.AlarmStatus=3)
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		JSON_VALUE(E.EventData,'$.Skipped_Checklists') AS Skipped_Checklist,O.Name as OperatorName,E.Latitude,E.longitude 
+		from AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System in (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		where A.SiteID=@SiteID AND A.EventCode=256 and CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=1284)
+	BEGIN
+		--Input_On_Event
+		INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,OperatorName,Latitude,Longitude) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		O.Name,E.Latitude,E.Longitude 
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		WHERE A.SiteID=@SiteID AND A.EventCode=1284 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		O.Name,E.Latitude,E.Longitude 
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		WHERE A.SiteID=@SiteID AND A.EventCode=1284 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=259)
+	BEGIN
+		--CheckList_Alarm
+		SELECT JSON_Value(E.EventData,'$.QuestionID') AS QuestionID, JSON_Value(E.EventData,'$.ResetEditAnswer') AS ResetEditAnswer,A.AssetID,A.OperatorID
+		INTO #Alarm3
+		FROM EventData2 E INNER JOIN ALARM A  ON A.ID=E.AlarmID 
+		LEFT JOIN CheckListQuestion C ON C.UniqueID=JSON_Value(E.EventData,'$.QuestionID')
+		LEFT JOIN Operator O ON O.UniqueID=JSON_Value(E.EventData,'$.Operator')
+		WHERE A.EventCode=260 AND CONVERT(Date,A.Date)>= @StartDate AND E.EventData IS NOT NULL
+		SELECT JSON_Value(E.EventData,'$.QuestionID') AS QuestionID, JSON_Value(E.EventData,'$.ResetEditAnswer') AS ResetEditAnswer,A.AssetID,A.OperatorID
+		INTO #Alarm5
+		FROM EventData2 E INNER JOIN AlarmArchive A  ON A.ID=E.AlarmID 
+		LEFT JOIN CheckListQuestion C ON C.UniqueID=JSON_Value(E.EventData,'$.QuestionID')
+		LEFT JOIN Operator O ON O.UniqueID=JSON_Value(E.EventData,'$.Operator')
+		WHERE A.EventCode=260 AND CONVERT(Date,A.Date)>=@StartDate AND E.EventData IS NOT NULL
+        INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,CheckListName,Question,Action,OperatorName,Latitude,Longitude,ResetEditAnswer,CheckListStartTime,Duration) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		C.Name Checklist,CQ.Name As Question,ISNULL(CQ.Action,0) Action,O.Name as OperatorName,E.Latitude,E.Longitude ,
+		CASE 
+		WHEN RE.ResetEditAnswer=0 THEN ''
+		WHEN RE.ResetEditAnswer=1 THEN CQ.Answer1
+		WHEN RE.ResetEditAnswer=2 THEN CQ.Answer2
+		WHEN RE.ResetEditAnswer=3 THEN CQ.Answer3
+		WHEN RE.ResetEditAnswer=4 THEN CQ.Answer4 END AS ResetEditAnswer,
+		CheckListStartTime=NULL,DURATION=NULL
+		FROM Alarm A 
+    	LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN #Alarm3 RE ON RE.AssetID=ASS.ID
+		LEFT JOIN CheckListQuestion CQ ON CQ.UniqueID=E.QuestionID
+		LEFT JOIN CheckList C ON C.ID=CQ.CheckListID
+		LEFT JOIN Operator O ON O.UniqueID=JSON_Value(E.EventData,'$.Operator')
+		WHERE A.SiteID=@SiteID AND A.EventCode=259 AND E.EventData IS NOT NULL AND CONVERT(Date,A.Date)>= @StartDate
+		UNION ALL
+		  
+		select A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		C.Name Checklist,CQ.Name As Question,ISNULL(CQ.Action,0) Action ,O.Name as OperatorName,E.Latitude,E.Longitude ,
+		CASE 
+		WHEN RE.ResetEditAnswer=0 THEN ''
+		WHEN RE.ResetEditAnswer=1 THEN CQ.Answer1
+		WHEN RE.ResetEditAnswer=2 THEN CQ.Answer2
+		WHEN RE.ResetEditAnswer=3 THEN CQ.Answer3
+		WHEN RE.ResetEditAnswer=4 THEN CQ.Answer4 END AS ResetEditAnswer,
+		CheckListStartTime=NULL,DURATION=NULL
+		FROM AlarmArchive A 
+    	LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN #Alarm5 RE ON RE.AssetID=ASS.ID
+		LEFT JOIN CheckListQuestion CQ ON CQ.UniqueID=E.QuestionID
+		LEFT JOIN CheckList C ON C.ID=CQ.CheckListID
+		LEFT JOIN Operator O ON O.UniqueID=JSON_Value(E.EventData,'$.Operator')
+		WHERE A.SiteID=@SiteID AND A.EventCode=259 AND E.EventData IS NOT NULL AND CONVERT(Date,A.Date)>= @StartDate)A
+		GROUP BY A.ID,A.AssetID,Asset,
+		A.Date,Checklist,A.EventCode,Question,Action,OperatorName,Latitude,Longitude,ResetEditAnswer 
+		
+
+		DROP TABLE #Alarm3
+		DROP TABLE #Alarm5
+	END
+ELSE IF(@EVENTCODE=518)
+	BEGIN
+		--Battery_High_Current_Alarm
+		INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,StartTimeAndDate,SOCLevel,Voltage,AverageCurrent,HighestCurrent,Duration,[Current],Temperature,EndTimeAndDate,OngoingAlarm) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,ROUND(JSON_VALUE(E.EventData,'$.Voltage')/100,2) AS Voltage,AB.AverageCableTemperature,AB.HighestCableTemperature,AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt
+		,CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmBattery A 
+		LEFT JOIN Site S ON S.ID=A.SiteID
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.AverageCableTemperature,E.HighestCableTemperature,E.Duration FROM AlarmBattery AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE AA.EventCode=519 ) AB on AB.ResetID=A.ResetID
+		WHERE A.SiteID=@SiteID AND A.EventCode=518 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,ROUND(JSON_VALUE(E.EventData,'$.Voltage')/100,2) AS Voltage,AB.AverageCableTemperature,AB.HighestCableTemperature,AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmBatteryArchive A 
+		LEFT JOIN Site S ON S.ID=A.SiteID
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.AverageCableTemperature,E.HighestCableTemperature,E.Duration FROM AlarmBatteryArchive AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE AA.EventCode=519 ) AB on AB.ResetID=A.ResetID
+		WHERE A.SiteID=@SiteID AND A.EventCode=518 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=524)
+	BEGIN
+		--Battery_Low_SoC_Alarm
+		INSERT INTO Common(EventID,EventCode,AssetID,AssetName,StartTimeAndDate,SOCLevel,Voltage,LowestSoC,Duration,[Current],Temperature,EndTimeAndDate,OngoingAlarm) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,ROUND(JSON_VALUE(E.EventData,'$.Voltage')/100,2) AS Voltage,AB.LowestSoCRecorded,AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmBattery A 
+		LEFT JOIN Site S ON S.ID=A.SiteID
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.LowestSoCRecorded,E.Duration FROM AlarmBattery AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE AA.EventCode=525 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=524 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,ROUND(JSON_VALUE(E.EventData,'$.Voltage')/100,2) AS Voltage,AB.LowestSoCRecorded,AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmBatteryArchive A 
+		LEFT JOIN Site S ON S.ID=A.SiteID
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.LowestSoCRecorded,E.Duration FROM AlarmBattery AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE AA.EventCode=525 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=524 AND CONVERT(Date,A.Date)>=@StartDate)A
+		END
+ELSE IF(@EVENTCODE=520)
+	BEGIN
+		--Battery_High_Temperature_Alarm
+		INSERT INTO Common(EventID,EventCode,AssetID,AssetName,StartTimeAndDate,SOCLevel,Voltage,AverageTemparature,HighestTemparature,Duration,[Current],Temperature,EndTimeAndDate,OngoingAlarm) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,ROUND(JSON_VALUE(E.EventData,'$.Voltage')/100,2) AS Voltage
+		,CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(AB.AverageCableTemperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(AB.AverageCableTemperature/100,2) END AS AverageCableTemperature,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(AB.HighestCableTemperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(AB.HighestCableTemperature/100,2) END AS HighestCableTemperature,
+		AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmBattery A
+		LEFT JOIN Site S ON S.ID=A.SiteID
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.AverageCableTemperature,E.HighestCableTemperature,E.Duration FROM AlarmBattery AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND AA.EventCode=521 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=520 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,ROUND(JSON_VALUE(E.EventData,'$.Voltage')/100,2) AS Voltage
+		,CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(AB.AverageCableTemperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(AB.AverageCableTemperature/100,2) END AS AverageCableTemperature,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(AB.HighestCableTemperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(AB.HighestCableTemperature/100,2) END AS HighestCableTemperature,
+		AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmBatteryArchive A
+		LEFT JOIN Site S ON S.ID=A.SiteID
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.AverageCableTemperature,E.HighestCableTemperature,E.Duration FROM AlarmBatteryArchive AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND AA.EventCode=521 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=520 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=269)
+	BEGIN
+	--Start_Of_Overweight_Alarm
+		INSERT INTO Common(EventID,EventCode,AssetID,AssetName,StartTimeAndDate,Weight,Duration,EndTimeAndDate,OngoingAlarm)
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		AB.MaxWeight,AB.Duration,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM Alarm A 
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,E.MaxWeight,E.Duration,AA.ResetID FROM Alarm AA 
+					INNER JOIN EventData2 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND AA.EventCode=270 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=269 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		AB.MaxWeight,AB.Duration,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmArchive A 
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,E.MaxWeight,E.Duration,AA.ResetID FROM AlarmArchive AA 
+					INNER JOIN EventData2 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND AA.EventCode=270 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=269 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=265)
+	BEGIN
+	--Low_Fuel_Alarm
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,Status) 
+	SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+	    E.Status
+		
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		LEFT OUTER JOIN (SELECT AA.ID,AA.ResetID FROM Alarm AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND AA.EventCode=265 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=265 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		E.Status
+		
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		LEFT OUTER JOIN (SELECT AA.ID,AA.ResetID FROM Alarm AA 
+					INNER JOIN EventData2 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND AA.EventCode=265 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=265 AND CONVERT(Date,A.Date)>=@StartDate)A
+END
+ELSE IF(@EVENTCODE=267)
+	BEGIN
+	--Geofence_Begin_Alarm
+      	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,StartTimeAndDate,Latitude,Longitude,EndTimeAndDate,Duration,OperatorName,OngoingAlarm) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		A.lat,a.lon,
+		FORMAT(A.Ended AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate,
+		AB.Duration,O.Name
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.UniqueID=E.Operator
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,JSON_VALUE(E.EVENTDATA,'$.Duration') AS DURATION FROM Alarm AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND E.EventCode=268 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=267 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		A.lat,a.lon,
+		FORMAT(A.Ended AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate,
+		AB.Duration,O.Name
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.UniqueID=E.Operator
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,JSON_VALUE(E.EVENTDATA,'$.Duration') AS DURATION FROM Alarm AA 
+					INNER JOIN EventData2 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND E.EventCode=268 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=267 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=274)
+	BEGIN
+	--Equipment_Speed_Alarm
+	   	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,Speed,OperatorName) 
+    	SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		AB.MaxSpeed,O.Name
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		LEFT OUTER JOIN (SELECT AA.ID,E.MaxSpeed,AA.ResetID,E.Duration FROM Alarm AA 
+					INNER JOIN EventData2 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND E.EventCode=275 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=274 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		AB.MaxSpeed,O.Name
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		LEFT OUTER JOIN (SELECT AA.ID,E.MaxSpeed,AA.ResetID,E.Duration FROM Alarm AA 
+					INNER JOIN EventData2 E ON E.AlarmID=AA.ID
+					INNER JOIN #ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND E.EventCode=275 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=274 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=266)
+	BEGIN
+	--Speeding_Alarm
+	   	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,Speed,NoOfAlerts,Duration,OperatorName) 
+    	SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		E.MaxSpeed,No_of_Alert='',E.Duration,O.Name
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=266 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		E.MaxSpeed,No_of_Alert='',E.Duration,O.Name
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=266 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=526)
+	BEGIN
+	--Battery_Mispick_Alert
+	    INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,SOCLevel,Temperature,Voltage,[Current],TimeOfCool,State) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		E.SocLevel,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		ROUND(E.Voltage/100,2) Voltage,JSON_VALUE(E.EventData,'$.Current') Currnt,E.TimeLeftToCool,E.BatteryState
+		FROM AlarmBattery A
+		LEFT JOIN SITE S ON S.ID=A.SiteID		
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+				
+		WHERE  A.SiteID=@SiteID AND A.EventCode=526 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		E.SocLevel,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		ROUND(E.Voltage/100,2) Voltage,JSON_VALUE(E.EventData,'$.Current') Currnt,E.TimeLeftToCool,E.BatteryState
+		FROM AlarmBatteryArchive A 
+		LEFT JOIN SITE S ON S.ID=A.SiteID		
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+				
+		WHERE  A.SiteID=@SiteID AND A.EventCode=526 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=522)
+	BEGIN
+	-- Battery_High_CableTemperature_Alarm
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,StartTimeAndDate,SOCLevel,Voltage,HighestTemparature,AverageTemparature,Duration,[Current],Temperature,EndTimeAndDate,OngoingAlarm) 
+		SELECT * FROM (
+      	SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,ROUND(JSON_VALUE(E.EventData,'$.Voltage')/100,2) AS Voltage,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(AB.HighestCableTemperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(AB.HighestCableTemperature/100,2) END AS HighestCableTemperature,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(AB.AverageCableTemperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(AB.AverageCableTemperature/100,2) END AS AverageCableTemperature
+		,AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmBattery A
+		LEFT JOIN SITE S ON S.ID=A.SiteID		
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.Temperature,E.HighestCableTemperature,E.AverageCableTemperature,E.Duration FROM AlarmBattery AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND AA.EventCode=523 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=522 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,ROUND(JSON_VALUE(E.EventData,'$.Voltage')/100,2) AS Voltage,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(AB.HighestCableTemperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(AB.HighestCableTemperature/100,2) END AS HighestCableTemperature,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(AB.AverageCableTemperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(AB.AverageCableTemperature/100,2) END AS AverageCableTemperature
+		,AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,
+		CASE
+		when S.UnitsTemperature=1 THEN ((ROUND(E.Temperature/100,2)*9/5)+32) 
+		WHEN S.UnitsTemperature=0 THEN  ROUND(E.Temperature/100,2) END AS Temperature,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		,CASE
+		WHEN AB.Date IS NULL THEN 'true'
+		ELSE 'false' END AS OngoingAlarm
+		FROM AlarmBatteryArchive A
+		LEFT JOIN SITE S ON S.ID=A.SiteID		
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.HighestCableTemperature,E.AverageCableTemperature,E.Duration FROM AlarmBatteryArchive AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND AA.EventCode=523 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=522 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=774)
+	BEGIN
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,Latitude,Longitude,AlertNo,X,Y,Z) 
+    SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		A.lat,A.lon,E.AlertNo,E.x_Max,E.y_Max,E.z_Max
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+				
+		WHERE  A.SiteID=@SiteID AND A.EventCode=774 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		A.lat,A.lon,E.AlertNo,E.x_Max,E.y_Max,E.z_Max
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+				
+		WHERE  A.SiteID=@SiteID AND A.EventCode=774 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=775)
+	BEGIN
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,Latitude,Longitude,AlertNo,ActualDuration,ExpectedDuration,CheckListName) 
+    SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		A.lat,A.lon,E.AlertNo,E.Actual_Seconds,E.Desired_Second,CQ.Name
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN CheckListQuestion CQ ON CQ.ChecklistID=ASS.CheckListID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=775 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		A.lat,A.lon,E.AlertNo,E.Actual_Seconds,E.Desired_Second,CQ.Name
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN CheckListQuestion CQ ON CQ.ChecklistID=ASS.CheckListID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=775 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=776)
+	BEGIN
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,Latitude,Longitude,AlertNo,ActualInput,ExpectedInput,CheckListName) 
+    SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		A.lat,A.lon,E.AlertNo,E.Actual_Input,E.Desired_Input,CQ.Name
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN CheckListQuestion CQ ON CQ.ChecklistID=ASS.CheckListID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=776 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		A.lat,A.lon,E.AlertNo,E.Actual_Input,E.Desired_Input,CQ.Name
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN CheckListQuestion CQ ON CQ.ChecklistID=ASS.CheckListID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=776 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=777)
+	BEGIN
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,Latitude,Longitude,OperatorName) 
+    SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		A.lat,A.lon,O.Name
+		FROM Alarm A 
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=777 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		A.lat,A.lon,O.Name
+		FROM AlarmArchive A 
+		LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=777 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=779)
+	BEGIN
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,Latitude,Longitude,HoursLeft,PMHours,OperatorName) 
+    SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		A.lat,A.lon,E.Hours_Past_PM_Alarm,E.PM_Hours,O.Name
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=779 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		A.lat,A.lon,E.Hours_Past_PM_Alarm,E.PM_Hours,O.Name
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=779 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=782)
+	BEGIN
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,Latitude,Longitude,Status,OperatorName) 
+    SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		A.lat,A.lon,E.Status,O.Name
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=782 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		A.lat,A.lon,E.Status,O.Name
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=782 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=783)
+	BEGIN
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,Speed,NoOfAlerts,HighestCurrent,OperatorName) 
+    SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		JSON_VALUE(E.EventData,'$.Speed') Speed,JSON_VALUE(E.EventData,'$.NoOfAlerts') NoOfAlerts,E.HighestValueRecorded,O.Name
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=783 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		JSON_VALUE(E.EventData,'$.Speed') Speed,JSON_VALUE(E.EventData,'$.NoOfAlerts') NoOfAlerts,E.HighestValueRecorded,O.Name
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=783 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=784)
+	BEGIN
+	--Under_PM_Alert
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,PMHours,HoursLeft,OperatorName) 
+    SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		E.PM_Timer,E.Hours_Past_PM_Alarm,O.Name
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=784 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		E.PM_Timer,E.Hours_Past_PM_Alarm,O.Name
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=784 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=785)
+	BEGIN
+	--Over_PM_Alert
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,PMHours,PastPM,OperatorName) 
+    SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		E.PM_Timer,E.Hours_Past_PM_Alarm,O.Name
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=785 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		E.PM_Timer,E.Hours_Past_PM_Alarm,O.Name
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=785 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=1026)
+	BEGIN
+	--Battery_Equalization_Due_Alert
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,LastEqualization) 
+    SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		FORMAT(E.LastEqualizationDate AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as LastEqualizationDate
+		FROM AlarmBattery A 
+		LEFT JOIN EventData4 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System = 4
+		WHERE  A.SiteID=@SiteID AND A.EventCode=1026 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		FORMAT(E.LastEqualizationDate AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as LastEqualizationDate
+		FROM AlarmBatteryArchive A 
+		LEFT JOIN EventData4 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System = 4
+		WHERE  A.SiteID=@SiteID AND A.EventCode=1026 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=1027)
+	BEGIN
+	--Battery_Equalization_Due_Reset
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,EqulizationMissed) 
+    SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		E.DaysEqualizationMissed
+		FROM AlarmBattery A 
+		LEFT JOIN EventData4 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System = 4
+		WHERE  A.SiteID=@SiteID AND A.EventCode=1027 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		E.DaysEqualizationMissed
+		FROM AlarmBatteryArchive A 
+		LEFT JOIN EventData4 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System = 4
+		WHERE  A.SiteID=@SiteID AND A.EventCode=1027 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=1024)
+	BEGIN
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,StartTimeAndDate,SOCLevel,Voltage,HighestTemparature,AverageTemparature,Duration,[Current],Temperature,EndTimeAndDate) 
+		SELECT * FROM (
+      	SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,JSON_VALUE(E.EventData,'$.Voltage') AS Voltage,AB.HighestCableTemperature,AB.AverageCableTemperature,AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,E.Temperature,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		
+		FROM AlarmBattery A 
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.Temperature,E.HighestCableTemperature,E.AverageCableTemperature,E.Duration FROM AlarmBattery AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND AA.EventCode=1025 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=1024 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,JSON_VALUE(E.EventData,'$.Voltage') AS Voltage,AB.HighestCableTemperature,AB.AverageCableTemperature,AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,E.Temperature,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		
+		FROM AlarmBatteryArchive A 
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.HighestCableTemperature,E.AverageCableTemperature,E.Duration FROM AlarmBatteryArchive AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND AA.EventCode=1025 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=1024 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=1029)
+	BEGIN
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,StartTimeAndDate,SOCLevel,Voltage,LowestSOC,Duration,[Current],Temperature,EndTimeAndDate) 
+		SELECT * FROM (
+      	SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,JSON_VALUE(E.EventData,'$.Voltage') AS Voltage,AB.LowestSoCRecorded,AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,E.Temperature,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		
+		FROM AlarmBattery A 
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.LowestSoCRecorded,E.Duration FROM AlarmBattery AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND AA.EventCode=1030 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=1029 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as StartDate,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,JSON_VALUE(E.EventData,'$.Voltage') AS Voltage,AB.LowestSoCRecorded,AB.Duration,JSON_VALUE(E.EventData,'$.Current') AS Currnt,E.Temperature,
+		FORMAT(AB.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as EndDate
+		
+		FROM AlarmBatteryArchive A 
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		LEFT OUTER JOIN (SELECT AA.ID,AA.Date,AA.ResetID,E.LowestSoCRecorded,E.Duration FROM AlarmBatteryArchive AA 
+					INNER JOIN EventData1 E ON E.AlarmID=AA.ID
+					INNER JOIN ASSET ASS ON ASS.ID=AA.AssetID AND ASS.System=4
+					WHERE  AA.SiteID=@SiteID AND AA.EventCode=1030 AND CONVERT(Date,AA.Date)>=@StartDate ) AB on AB.ResetID=A.ResetID
+		WHERE  A.SiteID=@SiteID AND A.EventCode=1029 AND CONVERT(Date,A.Date)>=@StartDate)A
+		END
+ELSE IF(@EVENTCODE=1028)
+	BEGIN
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,SOCLevel,Voltage,[Current],Temperature,EndTimeAndDate,TimeOfCool) 
+		SELECT * FROM (
+      	SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,JSON_VALUE(E.EventData,'$.Voltage') AS Voltage,JSON_VALUE(E.EventData,'$.Current') AS Currnt,E.Temperature,
+		E.BatteryState,E.TimeLeftToCool
+		FROM AlarmBattery A 
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		WHERE  A.SiteID=@SiteID AND A.EventCode=1028 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		JSON_VALUE(E.EventData,'$.SoCLevel') AS SocLevel,JSON_VALUE(E.EventData,'$.Voltage') AS Voltage,JSON_VALUE(E.EventData,'$.Current') AS Currnt,E.Temperature,
+		E.BatteryState,E.TimeLeftToCool
+		FROM AlarmBatteryArchive A 
+		LEFT JOIN EventData1 E ON E.AlarmID=A.ID
+	    LEFT JOIN ASSET ASS ON ASS.ID=A.AssetID AND ASS.System=4
+		WHERE  A.SiteID=@SiteID AND A.EventCode=1028 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=778)
+	BEGIN
+	--PM_Due_Update
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,Latitude,Longitude,OperatorName,PMHours,HoursLeft) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		E.Latitude,E.Longitude,O.NAME,E.PM_Hours,E.Hours_Past_PM_Alarm
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=778 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,
+		E.Latitude,E.Longitude,O.NAME,E.PM_Hours,E.Hours_Past_PM_Alarm
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=778 AND CONVERT(Date,A.Date)>=@StartDate)A
+	END
+ELSE IF(@EVENTCODE=789)
+	BEGIN
+	--Service Call
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date
+		
+		FROM AlarmBattery A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		WHERE  A.SiteID=@SiteID AND A.EventCode=789 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date
+		FROM AlarmArchive A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=789 AND CONVERT(Date,A.Date)>=@StartDate)A
+	
+	END
+ELSE IF(@EVENTCODE=784)
+	BEGIN
+	--PM_Alert
+	INSERT INTO COMMON(EventID,EventCode,AssetID,AssetName,DateAndTime,PMHours) 
+		SELECT * FROM(
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date
+		,E.Hours_Past_PM_Alarm
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		WHERE  A.SiteID=@SiteID AND A.EventCode=784 AND CONVERT(Date,A.Date)>=@StartDate
+		UNION ALL
+		SELECT A.ID,A.EventCode,A.AssetID,LTRIM(RTRIM(ASS.Name)) Asset,
+		FORMAT(A.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date,E.Hours_Past_PM_Alarm
+		FROM Alarm A 
+		LEFT JOIN EventData2 E ON E.AlarmID=A.ID
+	    LEFT JOIN #ASSET ASS ON ASS.ID=A.AssetID AND ASS.System IN (1,2,3)
+		LEFT JOIN Operator O ON O.ID=A.OperatorID		
+		WHERE  A.SiteID=@SiteID AND A.EventCode=784 AND CONVERT(Date,A.Date)>=@StartDate)A
+	
+	END
+ELSE IF (@EVENTCODE=263 OR @EVENTCODE=271 OR @EVENTCODE=272)
+    BEGIN
+	INSERT INTO Common (EventID,AssetID,AssetName,DateAndTime)
+		SELECT AC.ID,AC.AssetID,A.Name,
+		FORMAT(AC.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date
+		FROM Alarm AC LEFT JOIN #ASSET A ON A.ID=AC.AssetID
+		where AC.SiteID=@SiteID AND EventCode=@EventCode AND CONVERT(Date,AC.Date)=@StartDate
+		UNION ALL
+		SELECT AC.ID,AC.AssetID,A.Name,
+		FORMAT(AC.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date
+		FROM AlarmArchive AC LEFT JOIN #ASSET A ON A.ID=AC.AssetID
+		where AC.SiteID=@SiteID AND EventCode=@EventCode AND CONVERT(Date,AC.Date)=@StartDate
+   END
+ELSE
+	BEGIN
+	INSERT INTO Common (EventID,AssetID,AssetName,DateAndTime)
+		SELECT AC.ID,AC.AssetID,A.Name,
+		FORMAT(AC.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date
+		FROM Alarm AC LEFT JOIN #ASSET A ON A.ID=AC.AssetID
+		where AC.SiteID=@SiteID AND EventCode=@EVENTCODE AND CONVERT(Date,AC.Date)=@StartDate
+		UNION ALL
+		SELECT AC.ID,AC.AssetID,A.Name,
+		FORMAT(AC.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date
+		FROM AlarmArchive AC LEFT JOIN #ASSET A ON A.ID=AC.AssetID
+		LEFT JOIN #ASSET ASS ON ASS.ID=AC.AssetID 
+		WHERE AC.SiteID=@SiteID AND EventCode=@EVENTCODE AND CONVERT(Date,AC.Date)=@StartDate
+		UNION ALL
+		SELECT AC.ID,AC.AssetID,A.Name,
+		FORMAT(AC.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date
+		FROM AlarmCharger AC LEFT JOIN #ASSET A ON A.ID=AC.AssetID
+		where AC.SiteID=@SiteID AND EventCode=@EVENTCODE AND CONVERT(Date,AC.Date)=@StartDate
+		UNION ALL
+		SELECT AC.ID,AC.AssetID,A.Name,
+		FORMAT(AC.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date
+		FROM AlarmChargerArchive AC LEFT JOIN #ASSET A ON A.ID=AC.AssetID
+		LEFT JOIN #ASSET ASS ON ASS.ID=AC.AssetID 
+		WHERE AC.SiteID=@SiteID AND EventCode=@EVENTCODE AND CONVERT(Date,AC.Date)=@StartDate
+		UNION ALL
+		SELECT AC.ID,AC.AssetID,A.Name,
+		FORMAT(AC.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date
+		FROM AlarmBattery AC LEFT JOIN #ASSET A ON A.ID=AC.AssetID
+		where AC.SiteID=@SiteID AND EventCode=@EVENTCODE AND CONVERT(Date,AC.Date)=@StartDate
+		UNION ALL
+		SELECT AC.ID,AC.AssetID,A.Name,
+		FORMAT(AC.Date AT TIME ZONE 'UTC' AT TIME ZONE @SITETIMEZONE, 'MM/dd/yyyy hh:mm') as Date
+		FROM AlarmBatteryArchive AC LEFT JOIN #ASSET A ON A.ID=AC.AssetID
+		LEFT JOIN #ASSET ASS ON ASS.ID=AC.AssetID 
+		WHERE AC.SiteID=@SiteID AND EventCode=@EVENTCODE AND CONVERT(Date,AC.Date)=@StartDate
+	END
+
+SELECT * FROM COMMON
+DELETE FROM COMMON
+DROP TABLE #ASSET
+END
+--alter table Common add Current varchar(100)
+
+--SELECT * FROM CheckListQuestion
